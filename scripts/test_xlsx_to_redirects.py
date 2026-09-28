@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import io
 import sys
 import tempfile
 import unittest
 import zipfile
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 from xml.sax.saxutils import escape
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -14,6 +17,7 @@ from xlsx_to_redirects import (
     ConversionOptions,
     convert_workbook,
     encode_result,
+    main,
 )
 
 
@@ -201,15 +205,57 @@ class XlsxToRedirectsTest(unittest.TestCase):
         self.assertEqual(1, result.deduplicated_rows)
         self.assertEqual("https://old.example.com/path", result.redirects[0]["sourceURL"])
 
-    def test_conflicting_normalized_source_always_fails(self) -> None:
+    def test_conflicting_normalized_source_requires_explicit_skip(self) -> None:
+        rows = [
+            exact_row("K-00001", "https://old.example.com/path", "https://new.example.com/a"),
+            exact_row("K-00002", "http://OLD.example.com/path", "https://new.example.com/b"),
+        ]
+
         with self.assertRaisesRegex(ConversionError, "conflicting targets"):
-            self.convert(
-                [
-                    exact_row("K-00001", "https://old.example.com/path", "https://new.example.com/a"),
-                    exact_row("K-00002", "http://OLD.example.com/path", "https://new.example.com/b"),
-                ],
-                deduplicate_same_target=True,
-            )
+            self.convert(rows, deduplicate_same_target=True)
+
+        result = self.convert(
+            rows,
+            deduplicate_same_target=True,
+            skip_conflicting_targets=True,
+        )
+        self.assertEqual(1, len(result.redirects))
+        self.assertEqual("https://new.example.com/a", result.redirects[0]["targetURL"])
+        self.assertEqual(1, result.conflicting_rows)
+        self.assertEqual(1, len(result.conflict_warnings))
+        self.assertIn("row 3 (K-00002)", result.conflict_warnings[0])
+        self.assertIn("kept row 2 (K-00001)", result.conflict_warnings[0])
+        self.assertIn("skipped target 'https://new.example.com/b'", result.conflict_warnings[0])
+
+    def test_cli_logs_skipped_conflicting_target(self) -> None:
+        rows = [
+            exact_row("K-00001", "https://old.example.com/path", "https://new.example.com/a"),
+            exact_row("K-00002", "http://OLD.example.com/path", "https://new.example.com/b"),
+        ]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workbook_path = Path(temporary_directory) / "redirects.xlsx"
+            output_path = Path(temporary_directory) / "redirects.json"
+            write_workbook(workbook_path, [CHINESE_HEADERS, *rows])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            arguments = [
+                "xlsx_to_redirects.py",
+                "--input",
+                str(workbook_path),
+                "--output",
+                str(output_path),
+                "--deduplicate-same-target",
+                "--skip-conflicting-targets",
+            ]
+            with patch.object(sys, "argv", arguments), redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main()
+
+            self.assertEqual(0, exit_code)
+            self.assertTrue(output_path.is_file())
+
+        self.assertIn("WARNING: row 3 (K-00002)", stderr.getvalue())
+        self.assertIn("conflicting_rows=1", stdout.getvalue())
 
     def test_duplicate_rule_id_fails(self) -> None:
         with self.assertRaisesRegex(ConversionError, "duplicate rule ID"):
