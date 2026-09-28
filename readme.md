@@ -130,6 +130,44 @@ rule_id,source_url,target_url,status_code,preserve_query_string,subpath_matching
 R000001,https://legacy.example.com/product/100,https://www.example.com/products/100,301,false,false,true,seo,SEO-1234,2026-09-28,product migration
 ```
 
+### Excel to JSON converter
+
+The repository includes a dependency-free Python converter for `.xlsx` and `.xlsm` workbooks. It recognizes the production workbook columns `规则ID`, `匹配方式`, `匹配串(精确URL或正则)`, and `301目标(新站)`, as well as English columns such as `rule_id`, `source_url`, and `target_url`.
+
+Run the converter in strict mode first:
+
+```bash
+python3 scripts/xlsx_to_redirects.py \
+  --input /path/to/301-rules.xlsx \
+  --sheet 最终规则总表 \
+  --output dist/redirects.json \
+  --min-rules 18000 \
+  --max-rules 21000
+```
+
+Strict mode rejects unsupported match modes, source fragments, normalized duplicate sources, conflicting targets, invalid URLs, unexpected rule counts, and JSON larger than 16 MiB. It never writes a partial output file.
+
+After reviewing the workbook, the following options can handle specific known cases:
+
+```bash
+python3 scripts/xlsx_to_redirects.py \
+  --input /path/to/301-rules.xlsx \
+  --sheet 最终规则总表 \
+  --output dist/redirects.json \
+  --skip-unsupported \
+  --strip-source-fragments \
+  --deduplicate-same-target \
+  --min-rules 18000 \
+  --max-rules 21000
+```
+
+- `--skip-unsupported` omits rows such as regular-expression rules and reports the count. The plugin does not support regular expressions.
+- `--strip-source-fragments` removes source fragments because browsers do not send them to Traefik.
+- `--deduplicate-same-target` keeps the first normalized source only when every duplicate has the same target.
+- Conflicting targets for the same normalized `host + path + raw query` always fail and must be resolved in the workbook.
+
+The output is deterministic and reports the selected sheet, generated count, skipped count, byte size, and SHA-256. Commit the maintained workbook to the rules repository, but deploy only the generated `redirects.json`.
+
 CI for the rules repository should:
 
 1. Validate required fields, booleans, status codes, absolute URLs, fragments, and query/subpath conflicts.

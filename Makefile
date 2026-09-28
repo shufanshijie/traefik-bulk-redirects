@@ -11,6 +11,7 @@ endif
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
+PYTHON ?= python3
 
 .PHONY: all
 all: build
@@ -49,8 +50,12 @@ vet: ## Run go vet against code.
 lint: golangci-lint ## Run golangci-lint against code
 	$(GOLANGCI_LINT) run --timeout=2m ./...
 
+.PHONY: test-python
+test-python: ## Run Excel converter tests.
+	$(PYTHON) -m unittest discover -s scripts -p 'test_*.py' -v
+
 .PHONY: test
-test: fmt vet tidy ## Run tests.
+test: fmt vet tidy test-python ## Run tests.
 	go test ./... -v -coverprofile coverage.out -race
 
 ##@ Build
