@@ -74,6 +74,7 @@ class ConversionOptions:
     skip_unsupported: bool = False
     strip_source_fragments: bool = False
     deduplicate_same_target: bool = False
+    skip_conflicting_targets: bool = False
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,8 @@ class ConversionResult:
     unsupported_rows: int
     stripped_fragments: int
     deduplicated_rows: int
+    conflicting_rows: int
+    conflict_warnings: tuple[str, ...]
 
 
 class Problems:
@@ -364,6 +367,8 @@ def convert_workbook(input_path: Path, options: ConversionOptions) -> Conversion
     disabled_rows = 0
     stripped_fragments = 0
     deduplicated_rows = 0
+    conflicting_rows = 0
+    conflict_warnings: list[str] = []
 
     with XlsxWorkbook(input_path) as workbook:
         sheet = select_sheet(workbook, options.sheet_name, options.header_row)
@@ -453,6 +458,14 @@ def convert_workbook(input_path: Path, options: ConversionOptions) -> Conversion
                 if options.deduplicate_same_target and previous_target == target_url:
                     deduplicated_rows += 1
                     continue
+                if previous_target != target_url and options.skip_conflicting_targets:
+                    conflicting_rows += 1
+                    conflict_warnings.append(
+                        f"row {row_number} ({rule_id}): conflicting target skipped for "
+                        f"source {source_url!r}; kept row {previous_row} ({previous_rule_id}) "
+                        f"target {previous_target!r}; skipped target {target_url!r}"
+                    )
+                    continue
                 conflict = "conflicting targets" if previous_target != target_url else "duplicate source"
                 problems.add(
                     f"row {row_number} ({rule_id}): {conflict} after host/path/query normalization; "
@@ -496,6 +509,8 @@ def convert_workbook(input_path: Path, options: ConversionOptions) -> Conversion
         unsupported_rows=unsupported_rows,
         stripped_fragments=stripped_fragments,
         deduplicated_rows=deduplicated_rows,
+        conflicting_rows=conflicting_rows,
+        conflict_warnings=tuple(conflict_warnings),
     )
 
 
@@ -540,6 +555,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-unsupported", action="store_true")
     parser.add_argument("--strip-source-fragments", action="store_true")
     parser.add_argument("--deduplicate-same-target", action="store_true")
+    parser.add_argument(
+        "--skip-conflicting-targets",
+        action="store_true",
+        help="keep the first target and log later conflicting rows to standard error",
+    )
     return parser
 
 
@@ -568,6 +588,7 @@ def main() -> int:
         skip_unsupported=args.skip_unsupported,
         strip_source_fragments=args.strip_source_fragments,
         deduplicate_same_target=args.deduplicate_same_target,
+        skip_conflicting_targets=args.skip_conflicting_targets,
     )
     try:
         result = convert_workbook(args.input, options)
@@ -577,12 +598,15 @@ def main() -> int:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 1
 
+    for warning in result.conflict_warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
     print(f"sheet={result.sheet_name}")
     print(f"generated_rules={len(result.redirects)}")
     print(f"disabled_rows={result.disabled_rows}")
     print(f"unsupported_rows={result.unsupported_rows}")
     print(f"stripped_fragments={result.stripped_fragments}")
     print(f"deduplicated_rows={result.deduplicated_rows}")
+    print(f"conflicting_rows={result.conflicting_rows}")
     print(f"json_bytes={len(encoded)}")
     print(f"json_sha256={hashlib.sha256(encoded).hexdigest()}")
     print(f"output={args.output}")

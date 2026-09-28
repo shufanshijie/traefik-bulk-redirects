@@ -142,6 +142,7 @@ English columns such as `rule_id`, `source_url`, and `target_url` are also suppo
 Run the converter in strict mode first:
 
 ```bash
+mkdir -p dist
 python3 scripts/xlsx_to_redirects.py \
   --input /path/to/seo-mapping.xlsx \
   --sheet 源表 \
@@ -161,16 +162,18 @@ python3 scripts/xlsx_to_redirects.py \
   --output dist/redirects.json \
   --strip-source-fragments \
   --deduplicate-same-target \
+  --skip-conflicting-targets \
   --min-rules 20000 \
-  --max-rules 26000
+  --max-rules 26000 \
+  2> dist/redirect-conflicts.log
 ```
 
 - `--skip-unsupported` omits rows such as regular-expression rules and reports the count. The plugin does not support regular expressions.
 - `--strip-source-fragments` removes source fragments because browsers do not send them to Traefik.
 - `--deduplicate-same-target` keeps the first normalized source only when every duplicate has the same target.
-- Conflicting targets for the same normalized `host + path + raw query` always fail and must be resolved in the workbook.
+- `--skip-conflicting-targets` keeps the first target for a normalized `host + path + raw query`, logs each later conflicting row to standard error, and continues generating JSON. Without this option, conflicting targets fail validation.
 
-Do not use `--skip-unsupported` for a raw `源表` without a match-mode column. Those rows are already treated as exact redirects. Run strict mode first, review the reported fragments and duplicates, and only then use the two explicit cleanup options above. URLs that differ only by scheme or fragment can still resolve to the same runtime key, so conflicting targets require a business decision before deployment.
+Do not use `--skip-unsupported` for a raw `源表` without a match-mode column. Those rows are already treated as exact redirects. Run strict mode first, review the reported fragments and duplicates, and only then use the explicit cleanup options above. URLs that differ only by scheme or fragment can still resolve to the same runtime key. Review `redirect-conflicts.log` before deployment because source row order determines which target is retained.
 
 The output is deterministic and reports the selected sheet, generated count, skipped count, byte size, and SHA-256. Commit the maintained workbook to the rules repository, but deploy only the generated `redirects.json`.
 
