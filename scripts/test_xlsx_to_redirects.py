@@ -122,6 +122,42 @@ class XlsxToRedirectsTest(unittest.TestCase):
         self.assertEqual(301, result.redirects[0]["statusCode"])
         self.assertFalse(result.redirects[0]["preserveQueryString"])
 
+    def test_converts_raw_source_sheet_as_exact_redirects(self) -> None:
+        headers = [
+            "品类",
+            "页面URL",
+            "浏览量(PV)",
+            "访客数(UV)",
+            "贡献下游浏览量",
+            "退出页次数",
+            "平均停留时长",
+            "新网站映射链接",
+        ]
+        row = [
+            "箱包",
+            "https://old.example.com/list?page=2",
+            100,
+            80,
+            20,
+            60,
+            "00:01:15",
+            "https://new.example.com/bags",
+        ]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workbook_path = Path(temporary_directory) / "seo-mapping.xlsx"
+            write_workbook(workbook_path, [headers, row], sheet_name="源表")
+            result = convert_workbook(
+                workbook_path,
+                ConversionOptions(sheet_name="源表"),
+            )
+
+        self.assertEqual("源表", result.sheet_name)
+        self.assertEqual(1, len(result.redirects))
+        self.assertEqual("https://old.example.com/list?page=2", result.redirects[0]["sourceURL"])
+        self.assertEqual("https://new.example.com/bags", result.redirects[0]["targetURL"])
+        self.assertFalse(result.redirects[0]["subpathMatching"])
+
     def test_raw_query_order_is_distinct(self) -> None:
         result = self.convert(
             [

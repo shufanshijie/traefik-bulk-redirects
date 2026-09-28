@@ -132,17 +132,22 @@ R000001,https://legacy.example.com/product/100,https://www.example.com/products/
 
 ### Excel to JSON converter
 
-The repository includes a dependency-free Python converter for `.xlsx` and `.xlsm` workbooks. It recognizes the production workbook columns `规则ID`, `匹配方式`, `匹配串(精确URL或正则)`, and `301目标(新站)`, as well as English columns such as `rule_id`, `source_url`, and `target_url`.
+The repository includes a dependency-free Python converter for `.xlsx` and `.xlsm` workbooks. It recognizes both of these Chinese workbook layouts:
+
+- A raw source sheet named `源表` with `页面URL` and `新网站映射链接` columns. When no match-mode column exists, every populated row is treated as an exact redirect.
+- A reviewed rules sheet with `规则ID`, `匹配方式`, `匹配串(精确URL或正则)`, and `301目标(新站)` columns.
+
+English columns such as `rule_id`, `source_url`, and `target_url` are also supported.
 
 Run the converter in strict mode first:
 
 ```bash
 python3 scripts/xlsx_to_redirects.py \
-  --input /path/to/301-rules.xlsx \
-  --sheet 最终规则总表 \
+  --input /path/to/seo-mapping.xlsx \
+  --sheet 源表 \
   --output dist/redirects.json \
-  --min-rules 18000 \
-  --max-rules 21000
+  --min-rules 20000 \
+  --max-rules 26000
 ```
 
 Strict mode rejects unsupported match modes, source fragments, normalized duplicate sources, conflicting targets, invalid URLs, unexpected rule counts, and JSON larger than 16 MiB. It never writes a partial output file.
@@ -151,14 +156,13 @@ After reviewing the workbook, the following options can handle specific known ca
 
 ```bash
 python3 scripts/xlsx_to_redirects.py \
-  --input /path/to/301-rules.xlsx \
-  --sheet 最终规则总表 \
+  --input /path/to/seo-mapping.xlsx \
+  --sheet 源表 \
   --output dist/redirects.json \
-  --skip-unsupported \
   --strip-source-fragments \
   --deduplicate-same-target \
-  --min-rules 18000 \
-  --max-rules 21000
+  --min-rules 20000 \
+  --max-rules 26000
 ```
 
 - `--skip-unsupported` omits rows such as regular-expression rules and reports the count. The plugin does not support regular expressions.
@@ -166,12 +170,14 @@ python3 scripts/xlsx_to_redirects.py \
 - `--deduplicate-same-target` keeps the first normalized source only when every duplicate has the same target.
 - Conflicting targets for the same normalized `host + path + raw query` always fail and must be resolved in the workbook.
 
+Do not use `--skip-unsupported` for a raw `源表` without a match-mode column. Those rows are already treated as exact redirects. Run strict mode first, review the reported fragments and duplicates, and only then use the two explicit cleanup options above. URLs that differ only by scheme or fragment can still resolve to the same runtime key, so conflicting targets require a business decision before deployment.
+
 The output is deterministic and reports the selected sheet, generated count, skipped count, byte size, and SHA-256. Commit the maintained workbook to the rules repository, but deploy only the generated `redirects.json`.
 
 CI for the rules repository should:
 
 1. Validate required fields, booleans, status codes, absolute URLs, fragments, and query/subpath conflicts.
-2. Normalize source keys with the same host, port, path, and raw-query rules used by the plugin.
+2. Normalize source keys with the same host, path, and raw-query rules used by the plugin; the scheme and request port are not part of the runtime key.
 3. Reject duplicate `rule_id` values and duplicate normalized source keys.
 4. Enforce an expected rule-count range to catch accidental bulk deletion.
 5. Generate deterministic `redirects.json` and report its rule count, byte size, and SHA-256.
