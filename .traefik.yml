@@ -2,7 +2,7 @@ displayName: Bulk Redirects
 type: middleware
 iconPath: .assets/icon.png
 
-import: github.com/DoodleScheduling/traefik-bulk-redirects
+import: github.com/shufanshijie/traefik-bulk-redirects
 
 summary: Middleware for Cloudflare-style bulk redirects.
 
