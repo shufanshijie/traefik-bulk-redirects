@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -91,6 +92,95 @@ func TestExactRedirectDoesNotPreserveQueryStringWhenDisabled(t *testing.T) {
 
 	assertStatus(t, rec, http.StatusFound)
 	assertLocation(t, rec, "https://example.com/en/premium/")
+}
+
+func TestQuerySpecificRedirectHasPriorityOverPathRedirect(t *testing.T) {
+	handler := newTestHandler(t, []Redirect{
+		{
+			SourceURL: "https://example.com/legacy",
+			TargetURL: "https://example.com/default",
+		},
+		{
+			SourceURL: "https://example.com/legacy?campaign=spring",
+			TargetURL: "https://example.com/spring-offer",
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "https://example.com/legacy?campaign=spring", nil)
+	handler.ServeHTTP(rec, req)
+
+	assertStatus(t, rec, http.StatusMovedPermanently)
+	assertLocation(t, rec, "https://example.com/spring-offer")
+}
+
+func TestQuerySpecificRedirectFallsBackToPathRedirect(t *testing.T) {
+	handler := newTestHandler(t, []Redirect{
+		{
+			SourceURL: "https://example.com/legacy",
+			TargetURL: "https://example.com/default",
+		},
+		{
+			SourceURL: "https://example.com/legacy?campaign=spring",
+			TargetURL: "https://example.com/spring-offer",
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "https://example.com/legacy?campaign=summer", nil)
+	handler.ServeHTTP(rec, req)
+
+	assertStatus(t, rec, http.StatusMovedPermanently)
+	assertLocation(t, rec, "https://example.com/default")
+}
+
+func TestQuerySpecificRedirectUsesRawQueryOrder(t *testing.T) {
+	handler := newTestHandler(t, []Redirect{
+		{
+			SourceURL: "https://example.com/legacy?a=1&b=2",
+			TargetURL: "https://example.com/ordered",
+		},
+		{
+			SourceURL: "https://example.com/legacy?b=2&a=1",
+			TargetURL: "https://example.com/reordered",
+		},
+	})
+
+	tests := []struct {
+		name     string
+		url      string
+		location string
+	}{
+		{name: "original order", url: "https://example.com/legacy?a=1&b=2", location: "https://example.com/ordered"},
+		{name: "reversed order", url: "https://example.com/legacy?b=2&a=1", location: "https://example.com/reordered"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, tt.url, nil)
+			handler.ServeHTTP(rec, req)
+			assertStatus(t, rec, http.StatusMovedPermanently)
+			assertLocation(t, rec, tt.location)
+		})
+	}
+}
+
+func TestQuerySpecificRedirectCanPreserveMatchedQuery(t *testing.T) {
+	handler := newTestHandler(t, []Redirect{
+		{
+			SourceURL:           "https://example.com/legacy?campaign=spring",
+			TargetURL:           "https://example.com/offer?locale=en",
+			PreserveQueryString: true,
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "https://example.com/legacy?campaign=spring", nil)
+	handler.ServeHTTP(rec, req)
+
+	assertStatus(t, rec, http.StatusMovedPermanently)
+	assertLocation(t, rec, "https://example.com/offer?locale=en&campaign=spring")
 }
 
 func TestRedirectAppendsQueryStringWithAmpersandWhenTargetAlreadyHasQueryString(t *testing.T) {
@@ -392,7 +482,7 @@ func TestNewReturnsErrorWhenSourceURLIsNotAbsolute(t *testing.T) {
 	assertErrorContains(t, err, "sourceURL must be absolute")
 }
 
-func TestNewReturnsErrorWhenSourceURLContainsQueryString(t *testing.T) {
+func TestNewReturnsErrorWhenQuerySourceUsesSubpathMatching(t *testing.T) {
 	_, err := New(context.Background(), nextHandler(), &Config{
 		Redirects: []Redirect{
 			{
@@ -400,12 +490,12 @@ func TestNewReturnsErrorWhenSourceURLContainsQueryString(t *testing.T) {
 				TargetURL:           "https://example.com/en/premium/",
 				StatusCode:          http.StatusMovedPermanently,
 				PreserveQueryString: true,
-				SubpathMatching:     false,
+				SubpathMatching:     true,
 			},
 		},
 	}, "bulk-redirects")
 
-	assertErrorContains(t, err, "sourceURL must not contain query string")
+	assertErrorContains(t, err, "sourceURL with query string cannot use subpathMatching")
 }
 
 func TestNewReturnsErrorWhenSourceURLContainsFragment(t *testing.T) {
@@ -422,6 +512,54 @@ func TestNewReturnsErrorWhenSourceURLContainsFragment(t *testing.T) {
 	}, "bulk-redirects")
 
 	assertErrorContains(t, err, "sourceURL must not contain fragment")
+}
+
+func TestNewReturnsErrorForDuplicateExactRedirect(t *testing.T) {
+	_, err := New(context.Background(), nextHandler(), &Config{
+		Redirects: []Redirect{
+			{SourceURL: "https://EXAMPLE.com:443/legacy", TargetURL: "https://example.com/first"},
+			{SourceURL: "http://example.com/legacy", TargetURL: "https://example.com/second"},
+		},
+	}, "bulk-redirects")
+
+	assertErrorContains(t, err, "duplicate exact redirect sourceURL")
+}
+
+func TestNewReturnsErrorForDuplicateQueryRedirect(t *testing.T) {
+	_, err := New(context.Background(), nextHandler(), &Config{
+		Redirects: []Redirect{
+			{SourceURL: "https://EXAMPLE.com:443/legacy?a=1&b=2", TargetURL: "https://example.com/first"},
+			{SourceURL: "http://example.com/legacy?a=1&b=2", TargetURL: "https://example.com/second"},
+		},
+	}, "bulk-redirects")
+
+	assertErrorContains(t, err, "duplicate exact redirect sourceURL")
+}
+
+func TestNewReturnsErrorForDuplicateSubpathRedirect(t *testing.T) {
+	_, err := New(context.Background(), nextHandler(), &Config{
+		Redirects: []Redirect{
+			{SourceURL: "https://EXAMPLE.com:443/docs", TargetURL: "https://example.com/first", SubpathMatching: true},
+			{SourceURL: "http://example.com/docs", TargetURL: "https://example.com/second", SubpathMatching: true},
+		},
+	}, "bulk-redirects")
+
+	assertErrorContains(t, err, "duplicate subpath redirect sourceURL")
+}
+
+func TestExactAndSubpathRedirectCanShareSource(t *testing.T) {
+	handler := newTestHandler(t, []Redirect{
+		{SourceURL: "https://example.com/docs", TargetURL: "https://example.com/exact"},
+		{SourceURL: "https://example.com/docs", TargetURL: "https://example.com/prefix", SubpathMatching: true},
+	})
+
+	exactRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(exactRecorder, httptest.NewRequest(http.MethodGet, "https://example.com/docs", nil))
+	assertLocation(t, exactRecorder, "https://example.com/exact")
+
+	prefixRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(prefixRecorder, httptest.NewRequest(http.MethodGet, "https://example.com/docs/child", nil))
+	assertLocation(t, prefixRecorder, "https://example.com/prefix/child")
 }
 
 func TestNewReturnsErrorWhenTargetURLIsMissing(t *testing.T) {
@@ -456,7 +594,7 @@ func TestNewReturnsErrorWhenTargetURLIsNotAbsolute(t *testing.T) {
 }
 
 func TestParseSourceURLDefaultsEmptyPathToRoot(t *testing.T) {
-	host, path, err := parseSourceURL("https://example.com")
+	host, path, query, err := parseSourceURL("https://example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,6 +605,10 @@ func TestParseSourceURLDefaultsEmptyPathToRoot(t *testing.T) {
 
 	if path != "/" {
 		t.Fatalf("expected path %q, got %q", "/", path)
+	}
+
+	if query != "" {
+		t.Fatalf("expected empty query, got %q", query)
 	}
 }
 
@@ -1186,6 +1328,62 @@ func TestFileCacheRetainsMoreThanEightDistinctPaths(t *testing.T) {
 		t.Fatal("first file path did not retain its original compiled redirects")
 	}
 	assertHandlerRedirect(t, firstAgain, "https://cache-retained-a.example/source", "https://cache-retained-a.example/target")
+}
+
+func TestFileModeLoads25000ExactRedirects(t *testing.T) {
+	resetCaches()
+	const ruleCount = 25000
+	redirects := make([]Redirect, ruleCount)
+	for i := range redirects {
+		id := strconv.Itoa(i)
+		redirects[i] = Redirect{
+			SourceURL: "https://legacy.example/products/" + id,
+			TargetURL: "https://www.example.com/products/" + id,
+		}
+	}
+
+	path := writeRedirectFile(t, redirects)
+	handler := newBulkRedirects(t, fileConfig(path))
+	if got := len(handler.compiled.exactRedirects); got != ruleCount {
+		t.Fatalf("expected %d exact redirects, got %d", ruleCount, got)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "https://legacy.example/products/24999", nil)
+	handler.ServeHTTP(recorder, request)
+	assertStatus(t, recorder, http.StatusMovedPermanently)
+	assertLocation(t, recorder, "https://www.example.com/products/24999")
+}
+
+func BenchmarkExactRedirectLookup25000(b *testing.B) {
+	const ruleCount = 25000
+	redirects := make([]Redirect, ruleCount)
+	keys := make([]string, ruleCount)
+	for i := range redirects {
+		id := strconv.Itoa(i)
+		path := "/products/" + id
+		redirects[i] = Redirect{
+			SourceURL: "https://legacy.example" + path,
+			TargetURL: "https://www.example.com" + path,
+		}
+		keys[i] = buildKey("legacy.example", path)
+	}
+
+	compiled, err := compileRedirects(redirects)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	var state uint64 = 1
+	for i := 0; i < b.N; i++ {
+		state = state*6364136223846793005 + 1
+		key := keys[state%ruleCount]
+		if _, found := compiled.exactRedirects[key]; !found {
+			b.Fatal("redirect not found")
+		}
+	}
 }
 
 func fileConfig(path string) *Config {

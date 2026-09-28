@@ -43,8 +43,9 @@ type PrefixRedirect struct {
 }
 
 type compiledRedirects struct {
-	exactRedirects  map[string]Target
-	prefixRedirects map[string]PrefixRedirect
+	exactQueryRedirects map[string]Target
+	exactRedirects      map[string]Target
+	prefixRedirects     map[string]PrefixRedirect
 }
 
 const (
@@ -245,8 +246,21 @@ func newHandler(next http.Handler, name string, compiled *compiledRedirects) *Bu
 }
 
 func compileRedirects(redirects []Redirect) (*compiledRedirects, error) {
-	exactRedirects := make(map[string]Target, len(redirects))
-	prefixRedirects := make(map[string]PrefixRedirect)
+	var exactQueryCount, exactCount, prefixCount int
+	for _, redirect := range redirects {
+		switch {
+		case redirect.SubpathMatching:
+			prefixCount++
+		case strings.Contains(redirect.SourceURL, "?"):
+			exactQueryCount++
+		default:
+			exactCount++
+		}
+	}
+
+	exactQueryRedirects := make(map[string]Target, exactQueryCount)
+	exactRedirects := make(map[string]Target, exactCount)
+	prefixRedirects := make(map[string]PrefixRedirect, prefixCount)
 
 	for _, redirect := range redirects {
 		if redirect.StatusCode == 0 {
@@ -257,9 +271,12 @@ func compileRedirects(redirects []Redirect) (*compiledRedirects, error) {
 			return nil, fmt.Errorf("sourceURL is required")
 		}
 
-		sourceHost, sourcePath, err := parseSourceURL(redirect.SourceURL)
+		sourceHost, sourcePath, sourceQuery, err := parseSourceURL(redirect.SourceURL)
 		if err != nil {
 			return nil, err
+		}
+		if redirect.SubpathMatching && sourceQuery != "" {
+			return nil, fmt.Errorf("sourceURL with query string cannot use subpathMatching, got %q", redirect.SourceURL)
 		}
 
 		if redirect.TargetURL == "" {
@@ -283,6 +300,9 @@ func compileRedirects(redirects []Redirect) (*compiledRedirects, error) {
 		key := buildKey(sourceHost, sourcePath)
 
 		if redirect.SubpathMatching {
+			if _, found := prefixRedirects[key]; found {
+				return nil, fmt.Errorf("duplicate subpath redirect sourceURL %q", redirect.SourceURL)
+			}
 			prefixRedirects[key] = PrefixRedirect{
 				SourcePath: sourcePath,
 				Target:     target,
@@ -290,12 +310,25 @@ func compileRedirects(redirects []Redirect) (*compiledRedirects, error) {
 			continue
 		}
 
+		if sourceQuery != "" {
+			queryKey := buildQueryKey(sourceHost, sourcePath, sourceQuery)
+			if _, found := exactQueryRedirects[queryKey]; found {
+				return nil, fmt.Errorf("duplicate exact redirect sourceURL %q", redirect.SourceURL)
+			}
+			exactQueryRedirects[queryKey] = target
+			continue
+		}
+
+		if _, found := exactRedirects[key]; found {
+			return nil, fmt.Errorf("duplicate exact redirect sourceURL %q", redirect.SourceURL)
+		}
 		exactRedirects[key] = target
 	}
 
 	return &compiledRedirects{
-		exactRedirects:  exactRedirects,
-		prefixRedirects: prefixRedirects,
+		exactQueryRedirects: exactQueryRedirects,
+		exactRedirects:      exactRedirects,
+		prefixRedirects:     prefixRedirects,
 	}, nil
 }
 
@@ -345,6 +378,13 @@ func (bulkRedirects *BulkRedirects) ServeHTTP(rw http.ResponseWriter, req *http.
 	path := req.URL.EscapedPath()
 	if path == "" {
 		path = "/"
+	}
+
+	if req.URL.RawQuery != "" {
+		if target, found := bulkRedirects.compiled.exactQueryRedirects[buildQueryKey(host, path, req.URL.RawQuery)]; found {
+			redirect(rw, req, target, "")
+			return
+		}
 	}
 
 	if target, found := bulkRedirects.compiled.exactRedirects[buildKey(host, path)]; found {
@@ -435,22 +475,18 @@ func redirect(rw http.ResponseWriter, req *http.Request, target Target, suffix s
 	http.Redirect(rw, req, targetURL, target.StatusCode)
 }
 
-func parseSourceURL(sourceURL string) (string, string, error) {
+func parseSourceURL(sourceURL string) (string, string, string, error) {
 	parsed, err := url.Parse(sourceURL)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid sourceURL %q: %w", sourceURL, err)
+		return "", "", "", fmt.Errorf("invalid sourceURL %q: %w", sourceURL, err)
 	}
 
 	if parsed.Scheme == "" || parsed.Host == "" {
-		return "", "", fmt.Errorf("sourceURL must be absolute, got %q", sourceURL)
-	}
-
-	if parsed.RawQuery != "" {
-		return "", "", fmt.Errorf("sourceURL must not contain query string, got %q", sourceURL)
+		return "", "", "", fmt.Errorf("sourceURL must be absolute, got %q", sourceURL)
 	}
 
 	if parsed.Fragment != "" {
-		return "", "", fmt.Errorf("sourceURL must not contain fragment, got %q", sourceURL)
+		return "", "", "", fmt.Errorf("sourceURL must not contain fragment, got %q", sourceURL)
 	}
 
 	host := normalizeHost(parsed.Host)
@@ -459,7 +495,7 @@ func parseSourceURL(sourceURL string) (string, string, error) {
 		path = "/"
 	}
 
-	return host, path, nil
+	return host, path, parsed.RawQuery, nil
 }
 
 func validateTargetURL(targetURL string) error {
@@ -487,6 +523,10 @@ func normalizeHost(host string) string {
 
 func buildKey(host, path string) string {
 	return host + "\x00" + path
+}
+
+func buildQueryKey(host, path, rawQuery string) string {
+	return host + "\x00" + path + "\x00" + rawQuery
 }
 
 func isValidRedirectStatusCode(statusCode int) bool {

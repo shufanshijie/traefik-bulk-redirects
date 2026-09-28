@@ -1,35 +1,65 @@
 # Traefik Plugin Bulk Redirects
 
-[![release](https://img.shields.io/github/release/DoodleScheduling/traefik-bulk-redirects/all.svg)](https://github.com/DoodleScheduling/traefik-bulk-redirects/releases)
-[![report](https://goreportcard.com/badge/github.com/DoodleScheduling/traefik-bulk-redirects)](https://goreportcard.com/report/github.com/DoodleScheduling/traefik-bulk-redirects)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/DoodleScheduling/traefik-bulk-redirects/badge)](https://api.securityscorecards.dev/projects/github.com/DoodleScheduling/traefik-bulk-redirects)
-[![Coverage Status](https://coveralls.io/repos/github/DoodleScheduling/traefik-bulk-redirects/badge.svg?branch=master)](https://coveralls.io/github/DoodleScheduling/traefik-bulk-redirects?branch=master)
-[![license](https://img.shields.io/github/license/DoodleScheduling/traefik-bulk-redirects.svg)](https://github.com/DoodleScheduling/traefik-bulk-redirects/blob/master/LICENSE)
+[![CI](https://github.com/shufanshijie/traefik-bulk-redirects/actions/workflows/pr-build.yaml/badge.svg)](https://github.com/shufanshijie/traefik-bulk-redirects/actions/workflows/pr-build.yaml)
+[![release](https://img.shields.io/github/release/shufanshijie/traefik-bulk-redirects/all.svg)](https://github.com/shufanshijie/traefik-bulk-redirects/releases)
+[![license](https://img.shields.io/github/license/shufanshijie/traefik-bulk-redirects.svg)](https://github.com/shufanshijie/traefik-bulk-redirects/blob/master/LICENSE)
 
-A Traefik middleware plugin for Cloudflare-style bulk redirects. 
-It allows defining multiple redirects in a single Traefik Middleware configuration.
-This plugin supports exact redirects, subpath redirects, query string preservation, and configurable redirect status codes.
+A Traefik middleware plugin for large, Cloudflare-style redirect sets. It supports exact redirects, query-specific exact redirects, subpath redirects, query string preservation, and configurable redirect status codes.
 
-# Redirect fields
+This repository is a production-oriented fork of [DoodleScheduling/traefik-bulk-redirects](https://github.com/DoodleScheduling/traefik-bulk-redirects). Upstream `v0.0.1` supports inline rules only. This fork is based on the upstream `master` file-mode implementation and adds query-specific matching, duplicate detection, large-rule tests, and a production maintenance workflow.
+
+## Matching behavior
+
+Each request is evaluated in this order:
+
+1. Exact `host + path + raw query` lookup when the request has a query string.
+2. Exact `host + path` lookup as a fallback.
+3. Most-specific subpath lookup.
+4. Pass the request to the next handler.
+
+Exact lookups use Go maps and are average O(1). File rules are loaded, validated, and compiled once, then reused from memory. Requests do not read the rules file.
+
+Matching normalization is intentionally limited and predictable:
+
+- Host names are case-insensitive.
+- Explicit ports are ignored.
+- The source scheme is not part of the lookup key.
+- Paths use their escaped representation.
+- Query-specific rules compare the raw query exactly. `a=1&b=2` and `b=2&a=1` are different rules.
+- A request that misses a query-specific rule can still match the corresponding rule without a query.
+- Source fragments are rejected because browsers do not send fragments to the server.
+- Query-specific sources cannot use `subpathMatching`.
+- Duplicate normalized keys are rejected at startup instead of silently overwriting a rule.
+
+An exact rule and a subpath rule may intentionally share the same source path. The exact rule handles that path and the subpath rule handles its descendants.
+
+## Redirect fields
 
 | Key | Description |
 | --- | --- |
-| `sourceURL` | absolute source URL to match |
-| `targetURL` | absolute redirect destination URL |
-| `statusCode` | redirect status code: `301`, `302`, `303`, `307`, `308` |
-| `preserveQueryString` | `enabled` appends the original query string to the target URL |
-| `subpathMatching` | `enabled` matches the source path and all child paths below it |
+| `sourceURL` | Absolute source URL. Query strings are allowed for exact rules; fragments are rejected. |
+| `targetURL` | Absolute redirect destination URL. |
+| `statusCode` | Redirect status: `301`, `302`, `303`, `307`, or `308`. Defaults to `301`. |
+| `preserveQueryString` | Appends the request's original raw query to the target URL. |
+| `subpathMatching` | Matches the source path and child paths. Cannot be combined with a query-specific source. |
 
-# Configuration modes
+## Install
 
-The plugin supports `inline` and `file` configuration. Inline mode is backwards-compatible and convenient for small rulesets. File mode is recommended for large rulesets and global middlewares because the parsed and compiled redirects are shared by file path for the lifetime of the Traefik process.
+Pin a released version in Traefik's static configuration. Do not deploy from `master` or use a floating tag.
+
+```yaml
+experimental:
+  plugins:
+    companyBulkRedirects:
+      moduleName: github.com/shufanshijie/traefik-bulk-redirects
+      version: v0.1.0
+```
+
+Traefik downloads the plugin during startup. The Git tag, `go.mod` module path, and `.traefik.yml` import path must match exactly.
 
 ## Inline mode
 
-Inline mode embeds redirects in the Middleware resource. It is selected when `mode` is omitted or set to `inline`.
-
-Existing configurations do not need to change:
-
+Inline mode is the default and is suitable for small rule sets.
 
 ```yaml
 apiVersion: traefik.io/v1alpha1
@@ -38,128 +68,120 @@ metadata:
   name: bulk-redirects
 spec:
   plugin:
-    bulkRedirects:
-      # mode: inline # Optional; inline is the default.
+    companyBulkRedirects:
       redirects:
-      - sourceURL: https://example.com/premium/coupon
-        targetURL: https://example.com/en/premium/
-        statusCode: 302
-        preserveQueryString: enabled
-        subpathMatching: disabled
-      - sourceURL: https://example.com/docs
-        targetURL: https://example.com/en/resources
-        statusCode: 301
-        preserveQueryString: enabled
-        subpathMatching: enabled
+        - sourceURL: https://legacy.example.com/product/100
+          targetURL: https://www.example.com/products/100
+          statusCode: 301
+          preserveQueryString: false
+          subpathMatching: false
+        - sourceURL: https://legacy.example.com/landing?campaign=spring
+          targetURL: https://www.example.com/spring-offer
+          statusCode: 301
+          preserveQueryString: false
+          subpathMatching: false
 ```
-
-Inline mode is simple, but Traefik must decode the complete redirect list for every middleware instance. Prefer file mode for large rulesets.
 
 ## File mode
 
-File mode loads redirects from a JSON file mounted in the Traefik container. The first `New()` call for a new `filePath` reads, decodes, validates and compiles the file. Compiled file-based rulesets are cached by file path for the lifetime of the Traefik process. Subsequent middleware instances using that path reuse the exact compiled ruleset from memory. Cached middleware construction performs no filesystem reads or stats, hashing, JSON decoding, redirect validation or recompilation.
+File mode is recommended for large rule sets. `filePath` must be absolute and point to a regular JSON file no larger than 16 MiB. Inline `redirects` and `filePath` cannot be combined.
 
-File contents are considered immutable for the lifetime of the Traefik process. The plugin intentionally does not watch the file or detect in-place changes. Replacing or modifying a file at the same `filePath` does not update the redirects used by the running process. To apply new rules, start a new Traefik process, for example through a restart or rolling deployment. The new process starts with an empty plugin cache and loads the current rules file once.
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: bulk-redirects
+spec:
+  plugin:
+    companyBulkRedirects:
+      mode: file
+      filePath: /etc/traefik/bulk-redirects/redirects.json
+```
 
-The path must be absolute. File mode accepts only regular files with a maximum size of 16 MiB (16,777,216 bytes). Directories, pipes, devices, sockets, and other special files are rejected.
-
-### Redirect file
+The JSON file accepts only the top-level `redirects` field:
 
 ```json
 {
   "redirects": [
     {
-      "sourceURL": "https://example.com/old",
-      "targetURL": "https://example.com/new",
+      "sourceURL": "https://legacy.example.com/product/100",
+      "targetURL": "https://www.example.com/products/100",
       "statusCode": 301,
-      "preserveQueryString": true,
+      "preserveQueryString": false,
       "subpathMatching": false
     }
   ]
 }
 ```
 
-Only the `redirects` field is accepted in this file. Configuration fields such as `mode` and `filePath` belong in the Middleware resource.
+The compiled rules are cached by `filePath` for the lifetime of the Traefik process. Replacing a file at the same path does not reload it. Apply every rule update through a Traefik restart or rolling deployment.
 
-### Middleware
+## Production rule maintenance
 
-```yaml
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: bulk-redirects
-spec:
-  plugin:
-    bulkRedirects:
-      mode: file
-      filePath: /etc/traefik/bulk-redirects/redirects.json
+Keep plugin code and redirect data in separate repositories:
+
+- This repository publishes immutable plugin versions such as `v0.1.0`.
+- A separate rules repository owns `rules/redirects.csv`, generates `redirects.json`, and publishes an immutable rules image.
+
+Use UTF-8 CSV as the editable source of truth. A practical schema is:
+
+```csv
+rule_id,source_url,target_url,status_code,preserve_query_string,subpath_matching,enabled,owner,ticket,updated_at,note
+R000001,https://legacy.example.com/product/100,https://www.example.com/products/100,301,false,false,true,seo,SEO-1234,2026-09-28,product migration
 ```
 
-### Kubernetes deployment example
+CI for the rules repository should:
 
-The lifecycle described above is the plugin contract and is independent of any deployment platform. The plugin does not call Kubernetes APIs. In Kubernetes, the rules file must be mounted into every Traefik pod by the deployment configuration.
+1. Validate required fields, booleans, status codes, absolute URLs, fragments, and query/subpath conflicts.
+2. Normalize source keys with the same host, port, path, and raw-query rules used by the plugin.
+3. Reject duplicate `rule_id` values and duplicate normalized source keys.
+4. Enforce an expected rule-count range to catch accidental bulk deletion.
+5. Generate deterministic `redirects.json` and report its rule count, byte size, and SHA-256.
+6. Build a rules image tagged by commit SHA and deploy it by immutable image digest.
 
-A content-addressed ConfigMap can connect a rules change to the required Traefik rollout. For example, Kustomize adds a content hash to generated ConfigMap names by default:
-
-```yaml
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-configMapGenerator:
-- name: bulk-redirect-rules
-  files:
-  - redirects.json
-```
-
-This produces a ConfigMap such as `bulk-redirect-rules-<content-hash>`:
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: bulk-redirect-rules-<content-hash>
-data:
-  redirects.json: |
-    {
-      "redirects": [
-        {
-          "sourceURL": "https://example.com/old",
-          "targetURL": "https://example.com/new",
-          "statusCode": 301,
-          "preserveQueryString": true,
-          "subpathMatching": false
-        }
-      ]
-    }
-```
-
-Reference the generated ConfigMap from the Traefik Deployment or HelmRelease. A Deployment fragment can use the generator's base name because Kustomize updates known ConfigMap references to the generated name:
+For approximately 25,000 rules, the JSON commonly exceeds Kubernetes' 1 MiB ConfigMap limit. Store the JSON in a small rules image, copy it to an `emptyDir` with an init container, and mount that directory read-only into Traefik.
 
 ```yaml
 spec:
   template:
     spec:
+      initContainers:
+        - name: install-redirect-rules
+          image: registry.example.com/infra/traefik-redirect-rules@sha256:<digest>
+          command: ["cp", "/rules/redirects.json", "/work/redirects.json"]
+          volumeMounts:
+            - name: redirect-rules
+              mountPath: /work
       containers:
         - name: traefik
           volumeMounts:
-            - name: bulk-redirect-rules
+            - name: redirect-rules
               mountPath: /etc/traefik/bulk-redirects
               readOnly: true
       volumes:
-        - name: bulk-redirect-rules
-          configMap:
-            name: bulk-redirect-rules
+        - name: redirect-rules
+          emptyDir: {}
 ```
 
-### Updating file-based rules
+Recommended release flow:
 
-When `redirects.json` changes, Kustomize generates a different ConfigMap name. Propagating that name into the Deployment PodTemplate, directly or through HelmRelease values, triggers a rolling update. Each new Traefik process starts with an empty plugin cache and loads the new ruleset on first use. Because HelmRelease is a custom resource, its nested ConfigMap references may require a Kustomize `nameReference` configuration rather than relying on the built-in Deployment field handling.
+1. Business or SEO staff update the CSV in a pull request.
+2. CI validates and generates JSON; a technical owner reviews deletions and target-domain changes.
+3. Merge and build the rules image.
+4. Update the GitOps deployment to the new image digest.
+5. Roll out one canary pod and run known redirect smoke cases.
+6. Complete the rolling deployment with `maxUnavailable: 0` and `maxSurge: 1`.
 
-# Static configuration
+Rollback by restoring the previous rules image digest and rolling Traefik again. Record the plugin version, rules commit, rules image digest, and JSON SHA-256 for each production deployment.
 
-```yaml
-experimental:
-  plugins:
-    bulkRedirects:
-      moduleName: github.com/doodlescheduling/traefik-bulk-redirects
-      version: v0.0.1
+## Development and verification
+
+```bash
+go test ./...
+go test -race ./...
+go test -run '^$' -bench BenchmarkExactRedirectLookup25000 -benchmem ./...
 ```
+
+The test suite covers query priority and fallback, raw-query ordering, duplicate detection, the 16 MiB file limit, immutable file-cache behavior, concurrent access, loading 25,000 exact rules, and random lookups across a 25,000-rule map.
+
+Before a production rollout, measure total Traefik pod memory with the real rules file. The rule map, JSON decoding peak, Yaegi plugin runtime, Traefik, connections, and observability buffers all contribute to the pod limit.
